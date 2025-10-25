@@ -101,7 +101,8 @@ contract LoanManager is ReentrancyGuard {
         require(borrowerLoans[msg.sender].isActive, "No active loan");
         LoanInfo storage loan = borrowerLoans[msg.sender];
         uint256 balanceBefore = usdcToken.balanceOf(address(this));
-        RestrictedWallet(payable(loan.restrictedWallet)).returnFunds(address(this), address(usdcToken));
+        // Withdraw USDC from wallet to this contract
+        RestrictedWallet(payable(loan.restrictedWallet)).withdrawTokens(address(usdcToken), IERC20(usdcToken).balanceOf(loan.restrictedWallet));
         uint256 balanceAfter = usdcToken.balanceOf(address(this));
         uint256 returnedAmount = balanceAfter - balanceBefore;
         uint256 daysElapsed = (block.timestamp - loan.startTime) / 1 days;
@@ -139,7 +140,8 @@ contract LoanManager is ReentrancyGuard {
         require(borrowerLoans[borrower].isActive, "No active loan");
         require(collateralManager.isLiquidatable(borrower), "Not liquidatable");
         LoanInfo storage loan = borrowerLoans[borrower];
-        RestrictedWallet(payable(loan.restrictedWallet)).emergencyReturnFunds(address(this), address(usdcToken));
+        // Withdraw USDC from wallet to this contract
+        RestrictedWallet(payable(loan.restrictedWallet)).withdrawTokens(address(usdcToken), IERC20(usdcToken).balanceOf(loan.restrictedWallet));
         uint256 recoveredAmount = usdcToken.balanceOf(address(this));
         uint256 poolRecovery = recoveredAmount > loan.poolFunding ? loan.poolFunding : recoveredAmount;
         if (poolRecovery > 0) {

@@ -16,7 +16,7 @@ contract CollateralManager is ReentrancyGuard {
     uint256 public constant LOAN_DURATION = 30 days;
 
     // ----------- State -----------
-    address public immutable loanManager;
+    address public loanManager;
 
     struct LoanRecord {
         uint256 marginAmount;   // 20% user margin
@@ -37,6 +37,14 @@ contract CollateralManager is ReentrancyGuard {
      * @param _loanManager Address of the LoanManager contract
      */
     constructor(address _loanManager) {
+        loanManager = _loanManager;
+    }
+
+    /**
+     * @notice Update the LoanManager address
+     */
+    function setLoanManager(address _loanManager) external {
+        require(loanManager == address(0x1) || msg.sender == loanManager, "Not authorized");
         require(_loanManager != address(0), "Invalid loan manager");
         loanManager = _loanManager;
     }

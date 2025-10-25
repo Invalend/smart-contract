@@ -5,319 +5,275 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+import {UniversalRouter} from "@uniswap/universal-router/contracts/UniversalRouter.sol";
+import {Commands} from "@uniswap/universal-router/contracts/libraries/Commands.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IPermit2} from "@uniswap/permit2/src/interfaces/IPermit2.sol";
 
 /**
  * @title RestrictedWallet - Smart Wallet for Invalend Protocol
- * @notice This is a PoC implementation for secure DeFi trading
- * @dev Built for hackathon demonstration - production ready with clean architecture
- */
-
-/**
- * @title RestrictedWallet - Smart Wallet for Invalend Protocol
- * @notice This is a PoC implementation for secure DeFi trading
- * @dev Built for hackathon demonstration - production ready with clean architecture
+ * @notice Secure DeFi trading wallet with Uniswap V4 integration
+ * @dev Built for hackathon demonstration with clean V4-focused architecture
  */
 contract RestrictedWallet is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ============ STATE VARIABLES ============
     
-    /// @notice Mapping of approved target contracts (e.g., Uniswap routers)
+    /// @notice Universal Router for Uniswap V4 swaps
+    UniversalRouter public immutable universalRouter;
+    
+    /// @notice Pool Manager for Uniswap V4
+    IPoolManager public immutable poolManager;
+    
+    /// @notice Permit2 for enhanced token approvals
+    IPermit2 public immutable permit2;
+    
+    /// @notice Mapping of approved target contracts
     mapping(address => bool) public approvedTargets;
     
-    /// @notice Mapping of approved function selectors for enhanced security
+    /// @notice Mapping of approved function selectors
     mapping(bytes4 => bool) public approvedSelectors;
     
-    /// @notice Mapping of whitelisted tokens that can be traded
+    /// @notice Mapping of whitelisted tokens
     mapping(address => bool) public whitelistedTokens;
+    
+    /// @notice Authorized loan manager address
+    address public loanManager;
 
     // ============ EVENTS ============
     
-    /// @notice Emitted when a target contract is whitelisted or removed
     event TargetWhitelisted(address indexed target, bool approved);
-    
-    /// @notice Emitted when a function selector is approved or removed
-    event SelectorWhitelisted(bytes4 indexed selector, bool approved);
-    
-    /// @notice Emitted when a token is whitelisted for trading
-    event TokenWhitelisted(address indexed token, bool approved);
-    
-    /// @notice Emitted when a transaction is executed via the execute function
-    event TransactionExecuted(address indexed target, bytes data);
-    
-    /// @notice Emitted when a successful trade is completed
-    event TradeExecuted(
+    event SelectorApproved(bytes4 indexed selector, bool approved);
+    event TokenWhitelisted(address indexed token, bool whitelisted);
+    event V4TradeExecuted(
         address indexed tokenIn,
         address indexed tokenOut,
         uint256 amountIn,
-        uint256 amountOut,
-        address indexed router
+        uint256 amountOut
     );
-
-    // ============ CONSTRUCTOR ============
+    event TokensReceived(address indexed token, uint256 amount);
+    event TokensWithdrawn(address indexed token, uint256 amount);
 
     // ============ CONSTRUCTOR ============
     
-    /**
-     * @notice Initialize the RestrictedWallet with owner and setup default configurations
-     * @param _initialOwner The address that will own this wallet
-     */
-    constructor(address _initialOwner) Ownable(_initialOwner) {
-        _setupUniswapV3Selectors();
-        // Note: Tokens must be added manually for security in PoC
+    constructor(
+        address _initialOwner,
+        address _universalRouter,
+        address _poolManager,
+        address _permit2,
+        address _loanManager
+    ) Ownable(_initialOwner) {
+        require(_universalRouter != address(0), "Invalid Universal Router");
+        require(_poolManager != address(0), "Invalid Pool Manager");
+        require(_permit2 != address(0), "Invalid Permit2");
+        require(_loanManager != address(0), "Invalid Loan Manager");
+        
+        universalRouter = UniversalRouter(payable(_universalRouter));
+        poolManager = IPoolManager(_poolManager);
+        permit2 = IPermit2(_permit2);
+        loanManager = _loanManager;
+        
+        _setupV4Selectors();
     }
 
-    // ============ TRADING FUNCTIONS ============
-
-    // ============ TRADING FUNCTIONS ============
-
+    // ============ V4 SWAP FUNCTIONS ============
+    
     /**
-     * @notice Execute any whitelisted transaction (for advanced users)
-     * @param target The contract to call
-     * @param data The encoded function call data
-     * @dev This is the most flexible function but requires manual encoding
+     * @notice Execute exact input single swap using Uniswap V4
+     * @param poolKey The pool key for the swap
+     * @param amountIn Exact amount of input tokens
+     * @param amountOutMinimum Minimum amount of output tokens
+     * @param deadline Transaction deadline
+     * @return amountOut Amount of tokens received
      */
-    function execute(address target, bytes calldata data) external onlyOwner nonReentrant {
-        require(target != address(0), "Invalid target");
+    function swapExactInputSingleV4(
+        PoolKey calldata poolKey,
+        uint256 amountIn,
+        uint256 amountOutMinimum,
+        uint256 deadline
+    ) external onlyOwner nonReentrant returns (uint256 amountOut) {
+        require(block.timestamp <= deadline, "Transaction expired");
+        require(amountIn > 0, "Invalid amount");
+        
+        // Validate tokens are whitelisted
+        address tokenIn = Currency.unwrap(poolKey.currency0);
+        address tokenOut = Currency.unwrap(poolKey.currency1);
+        require(whitelistedTokens[tokenIn], "Input token not whitelisted");
+        require(whitelistedTokens[tokenOut], "Output token not whitelisted");
+        
+        // Check balance
+        require(IERC20(tokenIn).balanceOf(address(this)) >= amountIn, "Insufficient token balance");
+        
+        // Execute swap
+        amountOut = _swapExactInputSingleV4(poolKey, amountIn, amountOutMinimum, deadline);
+        
+        emit V4TradeExecuted(tokenIn, tokenOut, amountIn, amountOut);
+    }
+    
+    /**
+     * @notice Execute exact output single swap using Uniswap V4
+     * @param poolKey The pool key for the swap
+     * @param amountOut Exact amount of output tokens desired
+     * @param amountInMaximum Maximum amount of input tokens willing to spend
+     * @param deadline Transaction deadline
+     * @return amountIn Amount of tokens spent
+     */
+    function swapExactOutputSingleV4(
+        PoolKey calldata poolKey,
+        uint256 amountOut,
+        uint256 amountInMaximum,
+        uint256 deadline
+    ) external onlyOwner nonReentrant returns (uint256 amountIn) {
+        require(block.timestamp <= deadline, "Transaction expired");
+        require(amountOut > 0, "Invalid amount");
+        
+        // Validate tokens are whitelisted
+        address tokenIn = Currency.unwrap(poolKey.currency0);
+        address tokenOut = Currency.unwrap(poolKey.currency1);
+        require(whitelistedTokens[tokenIn], "Input token not whitelisted");
+        require(whitelistedTokens[tokenOut], "Output token not whitelisted");
+        
+        // Execute swap
+        amountIn = _swapExactOutputSingleV4(poolKey, amountOut, amountInMaximum, deadline);
+        
+        emit V4TradeExecuted(tokenIn, tokenOut, amountIn, amountOut);
+    }
+
+    // ============ EXECUTE FUNCTION ============
+    
+    /**
+     * @notice Execute arbitrary call to approved target
+     * @param target Target contract address
+     * @param data Call data
+     */
+    function execute(address target, bytes calldata data) external onlyOwner {
         require(approvedTargets[target], "Target not approved");
         
-        if (data.length >= 4) {
-            bytes4 selector = bytes4(data[:4]);
-            require(approvedSelectors[selector], "Function not approved");
-        }
-        
         (bool success, ) = target.call(data);
-        require(success, "Transaction failed");
-        
-        emit TransactionExecuted(target, data);
+        require(success, "Call failed");
     }
 
+    // ============ TOKEN MANAGEMENT ============
+    
     /**
-     * @notice Swap exact amount of input tokens for output tokens (most common use case)
-     * @param router Uniswap V3 Router address
-     * @param tokenIn Input token address  
-     * @param tokenOut Output token address
-     * @param fee Pool fee tier (500, 3000, or 10000)
-     * @param amountIn Exact amount of input tokens to swap
-     * @param amountOutMinimum Minimum amount of output tokens expected
-     * @param deadline Transaction deadline timestamp
-     * @return amountOut Actual amount of output tokens received
+     * @notice Get token balance
+     * @param token Token address
+     * @return balance Token balance
      */
-    function swapExactInputSingle(
-        address router,
-        address tokenIn,
-        address tokenOut,
-        uint24 fee,
-        uint256 amountIn,
-        uint256 amountOutMinimum,
-        uint256 deadline
-    ) external onlyOwner nonReentrant returns (uint256 amountOut) {
-        return _swapExactInputSingle(
-            router, tokenIn, tokenOut, fee, amountIn, amountOutMinimum, 0, deadline
-        );
+    function getBalance(address token) external view returns (uint256 balance) {
+        return IERC20(token).balanceOf(address(this));
     }
-
+    
     /**
-     * @notice Swap exact amount of input tokens (with price limit - advanced)
-     * @param router Uniswap V3 Router address
-     * @param tokenIn Input token address  
-     * @param tokenOut Output token address
-     * @param fee Pool fee tier (500, 3000, or 10000)
-     * @param amountIn Exact amount of input tokens to swap
-     * @param amountOutMinimum Minimum amount of output tokens expected
-     * @param sqrtPriceLimitX96 Price limit (0 = no limit)
-     * @param deadline Transaction deadline timestamp
-     * @return amountOut Actual amount of output tokens received
-     */
-    function swapExactInputSingle(
-        address router,
-        address tokenIn,
-        address tokenOut,
-        uint24 fee,
-        uint256 amountIn,
-        uint256 amountOutMinimum,
-        uint160 sqrtPriceLimitX96,
-        uint256 deadline
-    ) external onlyOwner nonReentrant returns (uint256 amountOut) {
-        return _swapExactInputSingle(
-            router, tokenIn, tokenOut, fee, amountIn, amountOutMinimum, sqrtPriceLimitX96, deadline
-        );
-    }
-
-    /**
-     * @notice Swap tokens for exact amount of output tokens (advanced use case)
-     * @param router Uniswap V3 Router address
-     * @param tokenIn Input token address
-     * @param tokenOut Output token address  
-     * @param fee Pool fee tier (500, 3000, or 10000)
-     * @param amountOut Exact amount of output tokens desired
-     * @param amountInMaximum Maximum amount of input tokens willing to spend
-     * @param deadline Transaction deadline timestamp
-     * @return amountIn Actual amount of input tokens spent
-     */
-    function swapExactOutputSingle(
-        address router,
-        address tokenIn,
-        address tokenOut,
-        uint24 fee,
-        uint256 amountOut,
-        uint256 amountInMaximum,
-        uint256 deadline
-    ) external onlyOwner nonReentrant returns (uint256 amountIn) {
-        return _swapExactOutputSingle(
-            router, tokenIn, tokenOut, fee, amountOut, amountInMaximum, 0, deadline
-        );
-    }
-
-    /**
-     * @notice Swap tokens for exact amount of output tokens (with price limit)
-     * @param router Uniswap V3 Router address
-     * @param tokenIn Input token address
-     * @param tokenOut Output token address  
-     * @param fee Pool fee tier (500, 3000, or 10000)
-     * @param amountOut Exact amount of output tokens desired
-     * @param amountInMaximum Maximum amount of input tokens willing to spend
-     * @param sqrtPriceLimitX96 Price limit (0 = no limit)
-     * @param deadline Transaction deadline timestamp
-     * @return amountIn Actual amount of input tokens spent
-     */
-    function swapExactOutputSingle(
-        address router,
-        address tokenIn,
-        address tokenOut,
-        uint24 fee,
-        uint256 amountOut,
-        uint256 amountInMaximum,
-        uint160 sqrtPriceLimitX96,
-        uint256 deadline
-    ) external onlyOwner nonReentrant returns (uint256 amountIn) {
-        return _swapExactOutputSingle(
-            router, tokenIn, tokenOut, fee, amountOut, amountInMaximum, sqrtPriceLimitX96, deadline
-        );
-    }
-
-    // ============ LOAN MANAGER FUNCTIONS ============
-
-    // ============ LOAN MANAGER FUNCTIONS ============
-
-    /**
-     * @notice Return funds to LoanManager (for loan repayment or liquidation)
-     * @param loanManager Address of the loan manager contract
-     * @param token Token to return (typically USDC)
-     * @dev Can be called by owner or loan manager for flexibility
-     */
-    function returnFunds(address loanManager, address token) external nonReentrant {
-        require(msg.sender == owner() || msg.sender == loanManager, "Not authorized");
-        require(loanManager != address(0), "Invalid loan manager");
-        require(token != address(0), "Invalid token");
-        
-        uint256 balance = IERC20(token).balanceOf(address(this));
-        if (balance > 0) {
-            IERC20(token).safeTransfer(loanManager, balance);
-        }
-    }
-
-    /**
-     * @notice Emergency fund return (only loan manager can call)
-     * @param loanManager Address of the loan manager contract
-     * @param token Token to return
-     * @dev Stricter access control for emergency situations
-     */
-    function emergencyReturnFunds(address loanManager, address token) external {
-        require(msg.sender == loanManager, "Only loan manager");
-        require(loanManager != address(0), "Invalid loan manager");
-        require(token != address(0), "Invalid token");
-        
-        uint256 balance = IERC20(token).balanceOf(address(this));
-        if (balance > 0) {
-            IERC20(token).safeTransfer(loanManager, balance);
-        }
-    }
-
-    // ============ OWNER WITHDRAWAL FUNCTIONS ============
-
-    // ============ OWNER WITHDRAWAL FUNCTIONS ============
-
-    /**
-     * @notice Withdraw specific amount of tokens (after loan repaid)
-     * @param token Token address (address(0) for ETH)
+     * @notice Withdraw tokens (owner or loan manager only)
+     * @param token Token address
      * @param amount Amount to withdraw
      */
-    function withdraw(address token, uint256 amount) external onlyOwner nonReentrant {
-        require(amount > 0, "Amount must be greater than 0");
+    function withdrawTokens(address token, uint256 amount) external {
+        require(msg.sender == owner() || msg.sender == loanManager, "Not authorized");
+        require(amount > 0, "Invalid amount");
+        require(IERC20(token).balanceOf(address(this)) >= amount, "Insufficient balance");
         
-        if (token == address(0)) {
-            require(address(this).balance >= amount, "Insufficient ETH");
-            payable(owner()).transfer(amount);
-        } else {
-            IERC20(token).safeTransfer(owner(), amount);
-        }
+        IERC20(token).safeTransfer(owner(), amount);
+        emit TokensWithdrawn(token, amount);
     }
 
+    // ============ POOL KEY UTILITIES ============
+    
     /**
-     * @notice Withdraw all tokens of a specific type (after loan repaid)
-     * @param token Token address (address(0) for ETH)
+     * @notice Create pool key with sorted currencies
+     * @param token0 First token address
+     * @param token1 Second token address
+     * @return poolKey Sorted pool key
      */
-    function withdrawAll(address token) external onlyOwner nonReentrant {
-        if (token == address(0)) {
-            uint256 balance = address(this).balance;
-            if (balance > 0) {
-                payable(owner()).transfer(balance);
-            }
+    function getPoolKey(address token0, address token1) external pure returns (PoolKey memory poolKey) {
+        // Ensure currencies are sorted by address
+        if (token0 < token1) {
+            return PoolKey({
+                currency0: Currency.wrap(token0),
+                currency1: Currency.wrap(token1),
+                fee: 3000,
+                tickSpacing: 60,
+                hooks: IHooks(address(0))
+            });
         } else {
-            uint256 balance = IERC20(token).balanceOf(address(this));
-            if (balance > 0) {
-                IERC20(token).safeTransfer(owner(), balance);
-            }
+            return PoolKey({
+                currency0: Currency.wrap(token1),
+                currency1: Currency.wrap(token0),
+                fee: 3000,
+                tickSpacing: 60,
+                hooks: IHooks(address(0))
+            });
         }
     }
 
-    // ============ CONFIGURATION FUNCTIONS ============
-
-    // ============ CONFIGURATION FUNCTIONS ============
-
+    // ============ ADMIN FUNCTIONS ============
+    
     /**
-     * @notice Add approved target contract (e.g., Uniswap router)
-     * @param target Contract address to approve
+     * @notice Add approved target
+     * @param target Target address
      */
     function addApprovedTarget(address target) external onlyOwner {
         require(target != address(0), "Invalid target");
         approvedTargets[target] = true;
         emit TargetWhitelisted(target, true);
     }
-
+    
     /**
-     * @notice Remove approved target contract
-     * @param target Contract address to remove
+     * @notice Remove approved target
+     * @param target Target address
      */
     function removeApprovedTarget(address target) external onlyOwner {
         approvedTargets[target] = false;
         emit TargetWhitelisted(target, false);
     }
-
+    
     /**
-     * @notice Add whitelisted token for trading
-     * @param token Token address to whitelist
+     * @notice Add approved selector
+     * @param selector Function selector
+     */
+    function addApprovedSelector(bytes4 selector) external onlyOwner {
+        approvedSelectors[selector] = true;
+        emit SelectorApproved(selector, true);
+    }
+    
+    /**
+     * @notice Remove approved selector
+     * @param selector Function selector
+     */
+    function removeApprovedSelector(bytes4 selector) external onlyOwner {
+        approvedSelectors[selector] = false;
+        emit SelectorApproved(selector, false);
+    }
+    
+    /**
+     * @notice Add whitelisted token
+     * @param token Token address
      */
     function addWhitelistedToken(address token) external onlyOwner {
         require(token != address(0), "Invalid token");
         whitelistedTokens[token] = true;
         emit TokenWhitelisted(token, true);
     }
-
+    
     /**
      * @notice Remove whitelisted token
-     * @param token Token address to remove
+     * @param token Token address
      */
     function removeWhitelistedToken(address token) external onlyOwner {
         whitelistedTokens[token] = false;
         emit TokenWhitelisted(token, false);
     }
-
+    
     /**
-     * @notice Batch add multiple tokens (gas efficient for setup)
-     * @param tokens Array of token addresses to whitelist
+     * @notice Add multiple whitelisted tokens
+     * @param tokens Array of token addresses
      */
     function addWhitelistedTokensBatch(address[] calldata tokens) external onlyOwner {
         for (uint256 i = 0; i < tokens.length; i++) {
@@ -327,62 +283,29 @@ contract RestrictedWallet is Ownable, ReentrancyGuard {
         }
     }
 
-    /**
-     * @notice Add approved function selector (for advanced use cases)
-     * @param selector Function selector to approve
-     */
-    function addApprovedSelector(bytes4 selector) external onlyOwner {
-        approvedSelectors[selector] = true;
-        emit SelectorWhitelisted(selector, true);
-    }
-
-    /**
-     * @notice Remove approved function selector
-     * @param selector Function selector to remove
-     */
-    function removeApprovedSelector(bytes4 selector) external onlyOwner {
-        approvedSelectors[selector] = false;
-        emit SelectorWhitelisted(selector, false);
-    }
-
     // ============ VIEW FUNCTIONS ============
-
-    // ============ VIEW FUNCTIONS ============
-
+    
     /**
-     * @notice Get token balance in this wallet
-     * @param token Token address (address(0) for ETH)
-     * @return balance Current balance
-     */
-    function getBalance(address token) external view returns (uint256 balance) {
-        if (token == address(0)) {
-            return address(this).balance;
-        } else {
-            return IERC20(token).balanceOf(address(this));
-        }
-    }
-
-    /**
-     * @notice Check if target contract is approved
-     * @param target Contract address to check
+     * @notice Check if target is approved
+     * @param target Target address
      * @return approved True if approved
      */
     function isTargetApproved(address target) external view returns (bool approved) {
         return approvedTargets[target];
     }
-
+    
     /**
-     * @notice Check if function selector is approved
-     * @param selector Function selector to check
+     * @notice Check if selector is approved
+     * @param selector Function selector
      * @return approved True if approved
      */
     function isSelectorApproved(bytes4 selector) external view returns (bool approved) {
         return approvedSelectors[selector];
     }
-
+    
     /**
-     * @notice Check if token is whitelisted for trading
-     * @param token Token address to check
+     * @notice Check if token is whitelisted
+     * @param token Token address
      * @return whitelisted True if whitelisted
      */
     function isTokenWhitelisted(address token) external view returns (bool whitelisted) {
@@ -390,127 +313,116 @@ contract RestrictedWallet is Ownable, ReentrancyGuard {
     }
 
     // ============ INTERNAL FUNCTIONS ============
-    // ============ INTERNAL FUNCTIONS ============
-
+    
     /**
-     * @notice Setup approved selectors for Uniswap V3 trading
-     * @dev Called during construction to enable trading functions
+     * @notice Setup approved selectors for V4 trading
      */
-    function _setupUniswapV3Selectors() internal {
-        // Use interface selectors for type safety and maintainability
-        approvedSelectors[ISwapRouter.exactInputSingle.selector] = true;
-        approvedSelectors[ISwapRouter.exactOutputSingle.selector] = true;
-        approvedSelectors[ISwapRouter.exactInput.selector] = true;
-        approvedSelectors[ISwapRouter.exactOutput.selector] = true;
+    function _setupV4Selectors() internal {
+        // Universal Router selectors
+        approvedSelectors[bytes4(keccak256("execute(bytes,bytes[],uint256)"))] = true;
         
-        // Also approve ERC20 approve for necessary token operations
+        // Position Manager selectors
+        approvedSelectors[IPositionManager.modifyLiquidities.selector] = true;
+        
+        // Pool Manager selectors
+        approvedSelectors[IPoolManager.initialize.selector] = true;
+        
+        // ERC20 selectors
         approvedSelectors[IERC20.approve.selector] = true;
+        approvedSelectors[IERC20.transfer.selector] = true;
+        approvedSelectors[IERC20.transferFrom.selector] = true;
+        
+        // Auto-approve V4 contracts as targets
+        approvedTargets[address(universalRouter)] = true;
+        approvedTargets[address(poolManager)] = true;
+        approvedTargets[address(permit2)] = true;
+        
+        emit TargetWhitelisted(address(universalRouter), true);
+        emit TargetWhitelisted(address(poolManager), true);
+        emit TargetWhitelisted(address(permit2), true);
     }
-
+    
     /**
-     * @notice Internal implementation of exactInputSingle swap
-     * @dev Centralizes validation and swap logic for reusability
+     * @notice Internal V4 exact input single swap
      */
-    function _swapExactInputSingle(
-        address router,
-        address tokenIn,
-        address tokenOut,
-        uint24 fee,
+    function _swapExactInputSingleV4(
+        PoolKey calldata poolKey,
         uint256 amountIn,
         uint256 amountOutMinimum,
-        uint160 sqrtPriceLimitX96,
         uint256 deadline
     ) internal returns (uint256 amountOut) {
-        // Comprehensive validation
-        require(router != address(0), "Invalid router");
-        require(approvedTargets[router], "Router not approved");
-        require(whitelistedTokens[tokenIn], "Input token not whitelisted");
-        require(whitelistedTokens[tokenOut], "Output token not whitelisted");
-        require(amountIn > 0, "Amount must be greater than 0");
-        require(deadline >= block.timestamp, "Transaction expired");
-
-        // Check sufficient balance
-        uint256 balance = IERC20(tokenIn).balanceOf(address(this));
-        require(balance >= amountIn, "Insufficient token balance");
-
-        // Setup approval
-        IERC20(tokenIn).forceApprove(router, amountIn);
-
-        // Execute swap
-        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
-            tokenIn: tokenIn,
-            tokenOut: tokenOut,
-            fee: fee,
-            recipient: address(this),
-            deadline: deadline,
-            amountIn: amountIn,
-            amountOutMinimum: amountOutMinimum,
-            sqrtPriceLimitX96: sqrtPriceLimitX96
-        });
-
-        amountOut = ISwapRouter(router).exactInputSingle(params);
+        // Encode V4 swap command
+        bytes memory commands = abi.encodePacked(uint8(0x00)); // V4_SWAP
         
-        // Clean up approval
-        IERC20(tokenIn).forceApprove(router, 0);
-
-        emit TradeExecuted(tokenIn, tokenOut, amountIn, amountOut, router);
+        // Encode actions
+        bytes memory actions = abi.encodePacked(
+            uint8(Actions.SWAP_EXACT_IN_SINGLE),
+            uint8(Actions.SETTLE_ALL),
+            uint8(Actions.TAKE_ALL)
+        );
+        
+        // Prepare parameters
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(
+            poolKey,
+            true, // zeroForOne
+            uint128(amountIn),
+            uint128(amountOutMinimum),
+            bytes("") // hookData
+        );
+        params[1] = abi.encode(poolKey.currency0, amountIn);
+        params[2] = abi.encode(poolKey.currency1, amountOutMinimum);
+        
+        // Execute swap
+        bytes[] memory inputs = new bytes[](1);
+        inputs[0] = abi.encode(actions, params);
+        
+        universalRouter.execute(commands, inputs, deadline);
+        
+        // Return actual amount received
+        address tokenOut = Currency.unwrap(poolKey.currency1);
+        amountOut = IERC20(tokenOut).balanceOf(address(this));
     }
-
+    
     /**
-     * @notice Internal implementation of exactOutputSingle swap
-     * @dev Centralizes validation and swap logic for reusability
+     * @notice Internal V4 exact output single swap
      */
-    function _swapExactOutputSingle(
-        address router,
-        address tokenIn,
-        address tokenOut,
-        uint24 fee,
+    function _swapExactOutputSingleV4(
+        PoolKey calldata poolKey,
         uint256 amountOut,
         uint256 amountInMaximum,
-        uint160 sqrtPriceLimitX96,
         uint256 deadline
     ) internal returns (uint256 amountIn) {
-        // Comprehensive validation
-        require(router != address(0), "Invalid router");
-        require(approvedTargets[router], "Router not approved");
-        require(whitelistedTokens[tokenIn], "Input token not whitelisted");
-        require(whitelistedTokens[tokenOut], "Output token not whitelisted");
-        require(amountOut > 0, "Amount must be greater than 0");
-        require(deadline >= block.timestamp, "Transaction expired");
-
-        // Check sufficient balance
-        uint256 balance = IERC20(tokenIn).balanceOf(address(this));
-        require(balance >= amountInMaximum, "Insufficient token balance");
-
-        // Setup approval
-        IERC20(tokenIn).forceApprove(router, amountInMaximum);
-
-        // Execute swap
-        ISwapRouter.ExactOutputSingleParams memory params = ISwapRouter.ExactOutputSingleParams({
-            tokenIn: tokenIn,
-            tokenOut: tokenOut,
-            fee: fee,
-            recipient: address(this),
-            deadline: deadline,
-            amountOut: amountOut,
-            amountInMaximum: amountInMaximum,
-            sqrtPriceLimitX96: sqrtPriceLimitX96
-        });
-
-        amountIn = ISwapRouter(router).exactOutputSingle(params);
+        // Encode V4 swap command
+        bytes memory commands = abi.encodePacked(uint8(0x00)); // V4_SWAP
         
-        // Clean up approval
-        IERC20(tokenIn).forceApprove(router, 0);
-
-        emit TradeExecuted(tokenIn, tokenOut, amountIn, amountOut, router);
+        // Encode actions
+        bytes memory actions = abi.encodePacked(
+            uint8(Actions.SWAP_EXACT_OUT_SINGLE),
+            uint8(Actions.SETTLE_ALL),
+            uint8(Actions.TAKE_ALL)
+        );
+        
+        // Prepare parameters
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(
+            poolKey,
+            true, // zeroForOne
+            uint128(amountOut),
+            uint128(amountInMaximum),
+            bytes("") // hookData
+        );
+        params[1] = abi.encode(poolKey.currency0, amountInMaximum);
+        params[2] = abi.encode(poolKey.currency1, amountOut);
+        
+        // Execute swap
+        bytes[] memory inputs = new bytes[](1);
+        inputs[0] = abi.encode(actions, params);
+        
+        universalRouter.execute(commands, inputs, deadline);
+        
+        // Return actual amount spent
+        address tokenIn = Currency.unwrap(poolKey.currency0);
+        amountIn = amountInMaximum - IERC20(tokenIn).balanceOf(address(this));
     }
-
-    // ============ RECEIVE FUNCTIONS ============
-    // ============ RECEIVE FUNCTIONS ============
-    
-    /// @notice Allow contract to receive ETH
-    receive() external payable {}
-    
-    /// @notice Fallback function for any other calls
-    fallback() external payable {}
-} 
+}

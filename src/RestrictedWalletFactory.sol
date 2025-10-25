@@ -22,6 +22,14 @@ contract RestrictedWalletFactory is ReentrancyGuard {
      * @param _loanManager LoanManager address
      */
     constructor(address _loanManager) {
+        loanManager = _loanManager;
+    }
+
+    /**
+     * @notice Update the LoanManager address
+     */
+    function setLoanManager(address _loanManager) external {
+        require(loanManager == address(0x1) || msg.sender == loanManager, "Not authorized");
         require(_loanManager != address(0), "Invalid loan manager address");
         loanManager = _loanManager;
     }
@@ -35,7 +43,13 @@ contract RestrictedWalletFactory is ReentrancyGuard {
         require(msg.sender == loanManager, "Only loan manager");
         require(borrower != address(0), "Invalid borrower address");
         require(userWallet[borrower] == address(0), "Wallet already exists");
-        RestrictedWallet newWallet = new RestrictedWallet(borrower);
+        RestrictedWallet newWallet = new RestrictedWallet(
+            borrower,
+            0x492E6456D9528771018DeB9E87ef7750EF184104, // Universal Router
+            0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408, // Pool Manager
+            0x000000000022D473030F116dDEE9F6B43aC78BA3,  // Permit2
+            loanManager // Loan Manager
+        );
         userWallet[borrower] = address(newWallet);
         wallets.push(address(newWallet));
         emit WalletCreated(borrower, address(newWallet));
@@ -53,7 +67,13 @@ contract RestrictedWalletFactory is ReentrancyGuard {
         if (userWallet[borrower] != address(0)) {
             return userWallet[borrower];
         }
-        RestrictedWallet newWallet = new RestrictedWallet(borrower);
+        RestrictedWallet newWallet = new RestrictedWallet(
+            borrower,
+            0x492E6456D9528771018DeB9E87ef7750EF184104, // Universal Router
+            0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408, // Pool Manager
+            0x000000000022D473030F116dDEE9F6B43aC78BA3,  // Permit2
+            loanManager // Loan Manager
+        );
         userWallet[borrower] = address(newWallet);
         wallets.push(address(newWallet));
         emit WalletCreated(borrower, address(newWallet));

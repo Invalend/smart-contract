@@ -296,7 +296,7 @@ contract LendingPool is ERC4626, ReentrancyGuard {
      * @notice Update the LoanManager address (emergency only)
      */
     function setLoanManager(address newLoanManager) external {
-        require(msg.sender == loanManager, "Only current loan manager");
+        require(msg.sender == loanManager || loanManager == address(0x1), "Only current loan manager");
         require(newLoanManager != address(0), "Invalid address");
         loanManager = newLoanManager;
     }
