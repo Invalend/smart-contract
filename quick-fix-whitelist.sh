@@ -38,3 +38,4 @@ if [ $? -eq 0 ]; then
 else
     echo "❌ Failed to whitelist tokens"
 fi
+

@@ -54,3 +54,4 @@ else
     echo "❌ Failed to whitelist tokens"
     echo "Please check the error messages above"
 fi
+

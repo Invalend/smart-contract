@@ -50,3 +50,4 @@ contract WhitelistTokens is Script {
         console.log("isTokenWhitelisted(MOCK_BTC)");
     }
 }
+

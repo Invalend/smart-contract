@@ -56,3 +56,4 @@ contract GetUserRestrictedWallet is Script {
         }
     }
 }
+

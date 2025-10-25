@@ -78,3 +78,4 @@ contract WhitelistTokensForWallet is Script {
         console.log("All tokens are now whitelisted for trading!");
     }
 }
+

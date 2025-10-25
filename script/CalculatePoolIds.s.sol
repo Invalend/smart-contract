@@ -59,3 +59,4 @@ contract CalculatePoolIds is Script {
         console.log("");
     }
 }
+
